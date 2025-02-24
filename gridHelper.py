@@ -4,8 +4,10 @@ import json
 from osgeo import ogr, osr
 
 parentdir = os.path.abspath(os.path.dirname(os.path.abspath(__file__))) 
-sys.path.insert(0,parentdir) 
+sys.path.insert(0,parentdir)
+
 import utils.demSampler as DS
+from utils.insertOrderDict import InsertOrderDict
 
 # Constants ####################################################################################################
 
@@ -29,6 +31,12 @@ def distance2D(x1: float, y1: float, x2: float, y2: float):
     dx = x1 - x2
     dy = y1 - y2
     return math.sqrt(dx ** 2 + dy ** 2)
+
+def simplify_fraction(n: int, m: int) -> tuple[int, int]:
+    a, b = n, m
+    while b != 0:
+        a, b = b, a % b
+    return (n // a, m // a)
 
 # NHGrid ###################################################################################################
 
@@ -192,7 +200,7 @@ class NHGridEdge:
 
 class NHGridHelper:
     
-    def __init__(self, path_or_json: str | dict):
+    def __init__(self, path_or_json: str | dict, dem_path: str, invalid_data: float = -9999):
         
         if isinstance(path_or_json, str):
         
@@ -201,6 +209,12 @@ class NHGridHelper:
                 data = json.load(file)
         else:
             data = path_or_json
+            
+        # Create dem sampler
+        self.sampler = DS.DemSampler(dem_path, invalid_data)
+        
+        # Create vertex getter
+        self.vertex_getter = InsertOrderDict()
         
         # Deserialize grid layer attributes
         self.CRS: str = data['CRS']
@@ -232,6 +246,7 @@ class NHGridHelper:
                 grid_edges
             )
             self.grids[grid_id] = grid
+            self.set_vertices_from_grid(grid_level, grid_global_id)
             
         # Deserialize edges
         self.edges: dict[int, NHGridEdge] = {}
@@ -256,28 +271,45 @@ class NHGridHelper:
             )
             self.update_adjacent_grids_along_edge(edge)
             self.edges[edge_id] = edge
-                
-        # Validate edges in grids
-        # for grid in self.grids.values():
-        #     north_edges = [ self.get_edge_by_id(edge_id) for edge_id in grid.edge_ids[EDGE_CODE_NORTH] ]
-        #     west_edges = [ self.get_edge_by_id(edge_id) for edge_id in grid.edge_ids[EDGE_CODE_WEST] ]
-        #     south_edges = [ self.get_edge_by_id(edge_id) for edge_id in grid.edge_ids[EDGE_CODE_SOUTH] ]
-        #     east_edges = [ self.get_edge_by_id(edge_id) for edge_id in grid.edge_ids[EDGE_CODE_EAST] ]
-            
-        #     invalid_n_edges = self.validate_edges(north_edges)
-        #     invalid_e_edges = self.validate_edges(west_edges)
-        #     invalid_s_edges = self.validate_edges(south_edges)
-        #     invalid_w_edges = self.validate_edges(east_edges)
-            
-        #     if len(invalid_n_edges) != 0:
-        #         self.process_invalid_edge(invalid_n_edges)
-        #     if len(invalid_e_edges) != 0:
-        #         self.process_invalid_edge(invalid_e_edges)
-        #     if len(invalid_s_edges) != 0:
-        #         self.process_invalid_edge(invalid_s_edges)
-        #     if len(invalid_w_edges) != 0:
-        #         self.process_invalid_edge(invalid_w_edges)
     
+    def set_vertices_from_grid(self, level: int, global_id: int):
+        
+        global_width = self.level_infos[level]['width']
+        global_height = self.level_infos[level]['height']
+        
+        global_u = global_id % global_width
+        global_v = math.floor(global_id / global_width)
+        
+        x_min_n, x_min_d = simplify_fraction(global_u, global_width)
+        x_max_n, x_max_d = simplify_fraction(global_u + 1, global_width)
+        y_min_n, y_min_d = simplify_fraction(global_v, global_height)
+        y_max_n, y_max_d = simplify_fraction(global_v + 1, global_height)
+        
+        tl_key = f'{x_min_n}-{x_min_d}-{y_max_n}-{y_max_d}'
+        tr_key = f'{x_max_n}-{x_max_d}-{y_max_n}-{y_max_d}'
+        bl_key = f'{x_min_n}-{x_min_d}-{y_min_n}-{y_min_d}'
+        br_key = f'{x_max_n}-{x_max_d}-{y_min_n}-{y_min_d}'
+        
+        self.set_vertex(tl_key)
+        self.set_vertex(tr_key)
+        self.set_vertex(bl_key)
+        self.set_vertex(br_key)
+        
+    def set_vertex(self, key):
+        
+        x_numerator, x_denominator, y_numerator, y_denominator = map(float, key.split('-'))
+        x = lerp(self.extent[0], self.extent[2], x_numerator / x_denominator)
+        y = lerp(self.extent[1], self.extent[3], y_numerator / y_denominator)
+        self.vertex_getter[key] = (x, y)
+        
+    def get_vertex(self, key: str): 
+        
+        vertex = self.vertex_getter.get(key, None)
+        if vertex is not None:
+            return vertex
+        else:
+            print(f'Error: No vertex hvaing key {key} was found.')
+        
     def create_grid_vertices(self, global_id: int, global_width: int, global_height: int) -> list[float]:
         
         extent = self.extent
@@ -295,10 +327,10 @@ class NHGridHelper:
         
         extent = self.extent
         direction = key[0]
-        pos_info = key[1:].split('-')
-        min = float(pos_info[0]) / float(pos_info[1])
-        max = float(pos_info[2]) / float(pos_info[3])
-        shared = float(pos_info[4]) / float(pos_info[5])
+        min_n, min_d, max_n, max_d, shared_n, shared_d = map(float, key[1:].split('-'))
+        min = min_n / min_d
+        max = max_n / max_d
+        shared = shared_n / shared_d
         
         if direction == 'h':
             min = lerp(extent[0], extent[2], min)
@@ -386,16 +418,17 @@ class NHGridHelper:
         return [ self.grids[grid_id] for grid_id in edge.grid_ids if grid_id is not None ]
     
     def get_edges_belong_to_grid(self, grid: NHGrid) -> list[NHGridEdge]:
-            
+        
         return [ self.edges[edge_id] for edge_set in grid.edge_ids for edge_id in edge_set ]
     
-    def export(self, output_path: str, dem_path: str = '', invalid_data: float = -9999):
+    def export(self, output_path: str):
         
         if not os.path.exists(output_path):
             os.makedirs(output_path)
         
-        if dem_path != '':
-            sampler = DS.DemSampler(dem_path, invalid_data)
+        sampler = self.sampler
+        
+        # Export ne.txt ##################################################
         
         gridInfo = ''
         for id in self.grids:
@@ -414,12 +447,14 @@ class NHGridHelper:
             top_edge_ids = ', '.join(map(str, [id + 1 for id in grid.get_north_edge_ids()]))
             
             center_point = grid.get_center()
-            center = ', '.join(map(str, [ *center_point, sampler.sampling(*center_point) if grid.altitude == invalid_data else grid.altitude ]))
+            center = ', '.join(map(str, [ *center_point, sampler.sampling(*center_point) if grid.altitude == sampler.invalid_data else grid.altitude ]))
             
             gridInfo += f'{id + 1}, {left_edge_num}, {right_edge_num}, {bottom_edge_num}, {top_edge_num}, {left_edge_ids}, {right_edge_ids}, {bottom_edge_ids}, {top_edge_ids}, {center}, {grid.type}\n'
                 
         with open(os.path.join(output_path, 'ne.txt'), 'w', encoding='utf-8') as file:
             file.write(gridInfo)
+            
+        # Export ns.txt ##################################################
         
         edge_info = ''
         for id in self.edges:
@@ -440,13 +475,50 @@ class NHGridHelper:
             bottom_grid_id = south_id + 1 if south_id is not None else 0
             
             center_point = edge.get_center()
-            center = ', '.join(map(str, [ *center_point, sampler.sampling(*center_point) if edge.altitude == invalid_data else edge.altitude ]))
+            center = ', '.join(map(str, [ *center_point, sampler.sampling(*center_point) if edge.altitude == sampler.invalid_data else edge.altitude ]))
             
             distance = edge.get_length()
             
             edge_info += f'{id + 1}, {direction}, {left_grid_id}, {right_grid_id}, {bottom_grid_id}, {top_grid_id}, {distance}, {center}, {edge.type}\n'
         
         with open(os.path.join(output_path, 'ns.txt'), 'w', encoding='utf-8') as file:
+            file.write(edge_info)
+        
+        # Export vertex.txt ##################################################
+        
+        vertex_info = ''
+        for index, vertex in enumerate(self.vertex_getter.values()):
+            x, y = vertex
+            z = sampler.sampling(x, y)
+            vertex_info += f'{index}, {x}, {y}, {z}\n'
+        with open(os.path.join(output_path, 'vertex.txt'), 'w', encoding='utf-8') as file:
+            file.write(vertex_info)
+        
+        # Export edge.txt ##################################################
+        
+        edge_info = ''
+        for id in self.edges:
+            edge = self.edges[id]
+            key = edge.key
+            direction = key[0]
+            min_n, min_d, max_n, max_d, shared_n, shared_d = key[1:].split('-')
+            
+            if direction == 'h':
+                begin_key = f'{min_n}-{min_d}-{shared_n}-{shared_d}'
+                end_key = f'{max_n}-{max_d}-{shared_n}-{shared_d}'
+            else:
+                begin_key = f'{shared_n}-{shared_d}-{min_n}-{min_d}'
+                end_key = f'{shared_n}-{shared_d}-{max_n}-{max_d}'
+            
+            begin_vertex_id = self.vertex_getter.get_insert_order(begin_key)
+            end_vertex_id = self.vertex_getter.get_insert_order(end_key)
+            
+            if begin_vertex_id is None or end_vertex_id is None:
+                print(f'Error: No vertex having key {begin_key} or {end_key} was found.')
+            
+            edge_info += f'{id + 1}, {begin_vertex_id}, {end_vertex_id}\n'
+            
+        with open(os.path.join(output_path, 'edge.txt'), 'w', encoding='utf-8') as file:
             file.write(edge_info)
             
     def export_shp(self, output_path: str, EPSG_code: int, dem_path: str = '', invalid_data: float = -9999):
