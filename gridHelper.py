@@ -38,33 +38,6 @@ def simplify_fraction(n: int, m: int) -> tuple[int, int]:
         a, b = b, a % b
     return (n // a, m // a)
 
-class CoordinateTransformer:
-    def __init__(self):
-        
-        # Source CRS: Custom EPSG: 2326
-        self.source_srs = osr.SpatialReference()
-        self.source_srs.ImportFromProj4(
-            "+proj=tmerc +lat_0=22.3121333333333 +lon_0=114.178555555556 +k=1 +x_0=836694.05 +y_0=819069.8 +a=6378388 +rf=297 +units=m +no_defs +type=crs +towgs84=0,0,0,0,0,0,0"
-        )
-        
-        # Target CRS: Standard EPSG: 2326
-        self.target_srs = osr.SpatialReference()
-        self.target_srs.ImportFromProj4(
-            "+proj=tmerc +lat_0=22.3121333333333 +lon_0=114.178555555556 +k=1 +x_0=836694.05 +y_0=819069.8 +ellps=intl +towgs84=-162.619,-276.959,-161.764,0.067753,-2.243649,-1.158827,-1.094246 +units=m +no_defs"
-        )
-        self.forward_trans = osr.CoordinateTransformation(self.source_srs, self.target_srs)
-        self.inverse_trans = osr.CoordinateTransformation(self.target_srs, self.source_srs)
-
-    def forward(self, x, y):
-        result = self.forward_trans.TransformPoint(x, y)
-        return result[0] + 17, result[1] + 53
-    
-    def inverse(self, x, y):
-        result = self.inverse_trans.TransformPoint(x, y)
-        return result[1], result[0]
-    
-transformer = CoordinateTransformer()
-
 # NHGrid ###################################################################################################
 
 class NHGrid:
@@ -249,12 +222,6 @@ class NHGridHelper:
         self.level_infos: list[dict[str, int]] = data['levelInfos']
         self.subdivide_rules: list[list[float]] = data['subdivideRules']
         
-        # Init vertices
-        for grid_info in data['grids']:
-            grid_level: int = grid_info['level']
-            grid_global_id: int = grid_info['globalId']
-            self.set_vertices_from_grid(grid_level, grid_global_id)
-        
         # Deserialize grids
         self.grids: dict[int, NHGrid] = {}
         for grid_info in data['grids']:
@@ -266,7 +233,7 @@ class NHGridHelper:
             grid_altitude: float = grid_info['height']
             grid_global_id: int = grid_info['globalId']
             grid_edges: list[list[int]] = grid_info['edges']
-            grid_vertices: list[float] = self.get_vertices_for_grid(grid_level, grid_global_id)
+            grid_vertices: list[float] = self.create_grid_vertices(grid_global_id, self.level_infos[grid_level]['width'], self.level_infos[grid_level]['height'])
             
             # Create grid
             grid = NHGrid(
@@ -279,6 +246,7 @@ class NHGridHelper:
                 grid_edges
             )
             self.grids[grid_id] = grid
+            self.set_vertices_from_grid(grid_level, grid_global_id)
             
         # Deserialize edges
         self.edges: dict[int, NHGridEdge] = {}
@@ -290,7 +258,7 @@ class NHGridHelper:
             edge_type: int = edge_info['type']
             edge_altitude: float = edge_info['height']
             adj_grids: list[int] = edge_info['adjGrids']
-            edge_vertices: list[float] = self.get_vertices_for_edge(edge_key)
+            edge_vertices: list[float] = self.create_edge_vertices(edge_key)
             
             # Create edge
             edge = NHGridEdge(
@@ -332,7 +300,6 @@ class NHGridHelper:
         x_numerator, x_denominator, y_numerator, y_denominator = map(float, key.split('-'))
         x = lerp(self.extent[0], self.extent[2], x_numerator / x_denominator)
         y = lerp(self.extent[1], self.extent[3], y_numerator / y_denominator)
-        
         self.vertex_getter[key] = (x, y)
         
     def get_vertex(self, key: str): 
@@ -342,43 +309,6 @@ class NHGridHelper:
             return vertex
         else:
             print(f'Error: No vertex hvaing key {key} was found.')
-            
-    def get_vertices_for_grid(self, level: int, global_id: int):
-        
-        global_width = self.level_infos[level]['width']
-        global_height = self.level_infos[level]['height']
-        
-        global_u = global_id % global_width
-        global_v = math.floor(global_id / global_width)
-        
-        x_min_n, x_min_d = simplify_fraction(global_u, global_width)
-        x_max_n, x_max_d = simplify_fraction(global_u + 1, global_width)
-        y_min_n, y_min_d = simplify_fraction(global_v, global_height)
-        y_max_n, y_max_d = simplify_fraction(global_v + 1, global_height)
-        
-        tl_key = f'{x_min_n}-{x_min_d}-{y_max_n}-{y_max_d}'
-        br_key = f'{x_max_n}-{x_max_d}-{y_min_n}-{y_min_d}'
-        
-        x_min, y_max = self.get_vertex(tl_key)
-        x_max, y_min = self.get_vertex(br_key)
-        
-        return [ x_min, y_min, x_max, y_max ]
-    
-    def get_vertices_for_edge(self, edge_key):
-        
-        direction = edge_key[0]
-        min_n, min_d, max_n, max_d, shared_n, shared_d = edge_key[1:].split('-')
-        
-        if direction == 'h':
-            begin_key = f'{min_n}-{min_d}-{shared_n}-{shared_d}'
-            end_key = f'{max_n}-{max_d}-{shared_n}-{shared_d}'
-        else:
-            begin_key = f'{shared_n}-{shared_d}-{min_n}-{min_d}'
-            end_key = f'{shared_n}-{shared_d}-{max_n}-{max_d}'
-        
-        x_begin, y_begin = self.get_vertex(begin_key)
-        x_end, y_end = self.get_vertex(end_key)
-        return [ x_begin, y_begin, x_end, y_end ]
         
     def create_grid_vertices(self, global_id: int, global_width: int, global_height: int) -> list[float]:
         
