@@ -31,19 +31,20 @@ class DemSampler:
     
     def sampling(self, x: float, y: float):
         
-        def clamp(_x, _max):
-            return min(_max, max(_x, 0))
+        def clamp(_x, _max) -> int:
+            return int(min(_max, max(_x, 0)))
         
         u = (x - self.origin_x) / self.pixel_width
         v = (y - self.origin_y) / self.pixel_height
         uv_desc = [ int(v), int(u), v % 1, u % 1 ]
         
-        y = uv_desc[0]
-        x = uv_desc[1]
-        ym1 = int(clamp(y - 1, self.height - 1))
-        xm1 = int(clamp(x - 1, self.width - 1))
-        yp1 = int(clamp(y + 1, self.height - 1))
-        xp1 = int(clamp(x + 1, self.width - 1))
+        x, y = uv_desc[1], uv_desc[0]
+        ym1 = clamp(y - 1, self.height - 1)
+        xm1 = clamp(x - 1, self.width - 1)
+        yp1 = clamp(y + 1, self.height - 1)
+        xp1 = clamp(x + 1, self.width - 1)
+        x = clamp(x, self.width - 1)
+        y = clamp(y, self.height - 1)
         
         ratio_y = uv_desc[2]
         ratio_x = uv_desc[3]
